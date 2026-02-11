@@ -5,11 +5,17 @@ import {
 } from "./calendar-schema.js";
 import { listEnabledFeishuAccounts } from "./accounts.js";
 import { resolveToolsConfig } from "./tools-config.js";
+import {
+  storeUserToken,
+  getUserAccessToken,
+  invalidateUserToken,
+  isUserTokenExpiredCode,
+  UserTokenExpiredError,
+  UserTokenNotFoundError,
+} from "./user-token.js";
+import type { FeishuClientCredentials } from "./client.js";
 
 const FEISHU_API_BASE = "https://open.feishu.cn/open-apis";
-
-// Token 过期错误码
-const TOKEN_EXPIRED_CODES = [99991663, 99991664, 99991665];
 
 function json(data: unknown) {
   return {
@@ -52,9 +58,8 @@ async function feishuRequest<T = any>(
   const data = await response.json();
 
   if (data.code !== 0) {
-    // 检查是否是 token 过期
-    if (TOKEN_EXPIRED_CODES.includes(data.code)) {
-      throw new Error(
+    if (isUserTokenExpiredCode(data.code)) {
+      throw new UserTokenExpiredError(
         `user_access_token 已过期或无效，请提供新的 token。错误: ${data.msg}`
       );
     }
@@ -64,11 +69,46 @@ async function feishuRequest<T = any>(
   return data;
 }
 
+// ============ Token-aware request wrapper ============
+
+/**
+ * 带自动 token 刷新的请求包装器。
+ * 1. 从缓存获取 token（可能自动刷新）
+ * 2. 发起请求
+ * 3. 如果请求中遇到 token 过期，标记失效后重试一次
+ */
+async function feishuRequestWithTokenRefresh<T = any>(
+  creds: FeishuClientCredentials,
+  accountId: string | undefined,
+  method: "GET" | "POST" | "PATCH" | "DELETE",
+  path: string,
+  params?: Record<string, string | number | boolean | undefined>,
+  body?: unknown
+): Promise<T> {
+  const { token } = await getUserAccessToken({ accountId, creds });
+
+  try {
+    return await feishuRequest<T>(token, method, path, params, body);
+  } catch (err) {
+    if (err instanceof UserTokenExpiredError) {
+      // token 在请求过程中过期，标记失效并重试一次
+      invalidateUserToken(accountId);
+      const refreshed = await getUserAccessToken({ accountId, creds });
+      return await feishuRequest<T>(refreshed.token, method, path, params, body);
+    }
+    throw err;
+  }
+}
+
 // ============ Core Functions ============
 
-async function getPrimaryCalendar(userAccessToken: string) {
-  const res = await feishuRequest(
-    userAccessToken,
+async function getPrimaryCalendar(
+  creds: FeishuClientCredentials,
+  accountId?: string
+) {
+  const res = await feishuRequestWithTokenRefresh(
+    creds,
+    accountId,
     "POST",
     "/calendar/v4/calendars/primary",
     { user_id_type: "user_id" }
@@ -89,7 +129,8 @@ async function getPrimaryCalendar(userAccessToken: string) {
 }
 
 async function listEvents(
-  userAccessToken: string,
+  creds: FeishuClientCredentials,
+  accountId: string | undefined,
   calendarId: string | undefined,
   startTime: string,
   endTime: string,
@@ -98,12 +139,13 @@ async function listEvents(
 ) {
   let calId = calendarId;
   if (!calId) {
-    const primary = await getPrimaryCalendar(userAccessToken);
+    const primary = await getPrimaryCalendar(creds, accountId);
     calId = primary.calendar_id;
   }
 
-  const res = await feishuRequest(
-    userAccessToken,
+  const res = await feishuRequestWithTokenRefresh(
+    creds,
+    accountId,
     "GET",
     `/calendar/v4/calendars/${encodeURIComponent(calId)}/events`,
     {
@@ -152,12 +194,14 @@ async function listEvents(
 }
 
 async function getEvent(
-  userAccessToken: string,
+  creds: FeishuClientCredentials,
+  accountId: string | undefined,
   calendarId: string,
   eventId: string
 ) {
-  const res = await feishuRequest(
-    userAccessToken,
+  const res = await feishuRequestWithTokenRefresh(
+    creds,
+    accountId,
     "GET",
     `/calendar/v4/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
     { user_id_type: "user_id" }
@@ -187,7 +231,8 @@ async function getEvent(
 }
 
 async function searchEvents(
-  userAccessToken: string,
+  creds: FeishuClientCredentials,
+  accountId: string | undefined,
   calendarId: string | undefined,
   query: string,
   startTime?: string,
@@ -195,7 +240,7 @@ async function searchEvents(
 ) {
   let calId = calendarId;
   if (!calId) {
-    const primary = await getPrimaryCalendar(userAccessToken);
+    const primary = await getPrimaryCalendar(creds, accountId);
     calId = primary.calendar_id;
   }
 
@@ -206,8 +251,9 @@ async function searchEvents(
     if (endTime) body.filter.end_time = { timestamp: endTime };
   }
 
-  const res = await feishuRequest(
-    userAccessToken,
+  const res = await feishuRequestWithTokenRefresh(
+    creds,
+    accountId,
     "POST",
     `/calendar/v4/calendars/${encodeURIComponent(calId)}/events/search`,
     { user_id_type: "user_id" },
@@ -232,7 +278,8 @@ async function searchEvents(
 }
 
 async function createEvent(
-  userAccessToken: string,
+  creds: FeishuClientCredentials,
+  accountId: string | undefined,
   calendarId: string | undefined,
   summary: string,
   startTime: string,
@@ -250,7 +297,7 @@ async function createEvent(
 ) {
   let calId = calendarId;
   if (!calId) {
-    const primary = await getPrimaryCalendar(userAccessToken);
+    const primary = await getPrimaryCalendar(creds, accountId);
     calId = primary.calendar_id;
   }
 
@@ -277,8 +324,9 @@ async function createEvent(
   if (options.free_busy_status) body.free_busy_status = options.free_busy_status;
   if (options.visibility) body.visibility = options.visibility;
 
-  const res = await feishuRequest(
-    userAccessToken,
+  const res = await feishuRequestWithTokenRefresh(
+    creds,
+    accountId,
     "POST",
     `/calendar/v4/calendars/${encodeURIComponent(calId)}/events`,
     { user_id_type: "user_id" },
@@ -298,7 +346,8 @@ async function createEvent(
 }
 
 async function updateEvent(
-  userAccessToken: string,
+  creds: FeishuClientCredentials,
+  accountId: string | undefined,
   calendarId: string,
   eventId: string,
   updates: {
@@ -330,8 +379,9 @@ async function updateEvent(
     };
   }
 
-  const res = await feishuRequest(
-    userAccessToken,
+  const res = await feishuRequestWithTokenRefresh(
+    creds,
+    accountId,
     "PATCH",
     `/calendar/v4/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
     { user_id_type: "user_id" },
@@ -350,13 +400,15 @@ async function updateEvent(
 }
 
 async function deleteEvent(
-  userAccessToken: string,
+  creds: FeishuClientCredentials,
+  accountId: string | undefined,
   calendarId: string,
   eventId: string,
   needNotification: boolean = false
 ) {
-  await feishuRequest(
-    userAccessToken,
+  await feishuRequestWithTokenRefresh(
+    creds,
+    accountId,
     "DELETE",
     `/calendar/v4/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
     { need_notification: needNotification }
@@ -390,6 +442,14 @@ export function registerFeishuCalendarTools(api: OpenClawPluginApi) {
     return;
   }
 
+  // 应用凭证，用于 refresh_token 续期时获取 app_access_token
+  const creds: FeishuClientCredentials = {
+    accountId: firstAccount.accountId,
+    appId: firstAccount.appId,
+    appSecret: firstAccount.appSecret,
+    domain: firstAccount.domain,
+  };
+
   api.registerTool(
     {
       name: "feishu_calendar",
@@ -399,14 +459,24 @@ export function registerFeishuCalendarTools(api: OpenClawPluginApi) {
       parameters: FeishuCalendarSchema,
       async execute(_toolCallId, params) {
         const p = params as FeishuCalendarParams;
+        const accountId = firstAccount.accountId;
+
         try {
+          // 每次调用时存储用户传入的 token（更新缓存）
+          storeUserToken({
+            accountId,
+            userAccessToken: p.user_access_token,
+            refreshToken: (p as any).refresh_token,
+          });
+
           switch (p.action) {
             case "get_primary":
-              return json(await getPrimaryCalendar(p.user_access_token));
+              return json(await getPrimaryCalendar(creds, accountId));
             case "list_events":
               return json(
                 await listEvents(
-                  p.user_access_token,
+                  creds,
+                  accountId,
                   p.calendar_id,
                   p.start_time,
                   p.end_time,
@@ -417,7 +487,8 @@ export function registerFeishuCalendarTools(api: OpenClawPluginApi) {
             case "get_event":
               return json(
                 await getEvent(
-                  p.user_access_token,
+                  creds,
+                  accountId,
                   p.calendar_id,
                   p.event_id
                 )
@@ -425,7 +496,8 @@ export function registerFeishuCalendarTools(api: OpenClawPluginApi) {
             case "search_events":
               return json(
                 await searchEvents(
-                  p.user_access_token,
+                  creds,
+                  accountId,
                   p.calendar_id,
                   p.query,
                   p.start_time,
@@ -435,7 +507,8 @@ export function registerFeishuCalendarTools(api: OpenClawPluginApi) {
             case "create_event":
               return json(
                 await createEvent(
-                  p.user_access_token,
+                  creds,
+                  accountId,
                   p.calendar_id,
                   p.summary,
                   p.start_time,
@@ -455,7 +528,8 @@ export function registerFeishuCalendarTools(api: OpenClawPluginApi) {
             case "update_event":
               return json(
                 await updateEvent(
-                  p.user_access_token,
+                  creds,
+                  accountId,
                   p.calendar_id,
                   p.event_id,
                   {
@@ -471,7 +545,8 @@ export function registerFeishuCalendarTools(api: OpenClawPluginApi) {
             case "delete_event":
               return json(
                 await deleteEvent(
-                  p.user_access_token,
+                  creds,
+                  accountId,
                   p.calendar_id,
                   p.event_id,
                   p.need_notification
@@ -481,14 +556,17 @@ export function registerFeishuCalendarTools(api: OpenClawPluginApi) {
               return json({ error: `Unknown action: ${(p as any).action}` });
           }
         } catch (err) {
-          const errorMsg = err instanceof Error ? err.message : String(err);
-          // 如果是 token 过期，提示用户
-          if (errorMsg.includes("user_access_token")) {
+          if (
+            err instanceof UserTokenExpiredError ||
+            err instanceof UserTokenNotFoundError
+          ) {
             return json({
-              error: errorMsg,
+              error: err.message,
+              token_expired: true,
               hint: "请提供新的 user_access_token（以 u- 开头）",
             });
           }
+          const errorMsg = err instanceof Error ? err.message : String(err);
           return json({ error: errorMsg });
         }
       },

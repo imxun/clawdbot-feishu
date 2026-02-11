@@ -8,20 +8,28 @@ const TimeSchema = Type.Object({
   ),
 });
 
+// 公共字段：所有 action 都需要的 token 字段
+const UserTokenFields = {
+  user_access_token: Type.String({
+    description: "用户访问令牌 (user_access_token)，以 u- 开头",
+  }),
+  refresh_token: Type.Optional(
+    Type.String({
+      description: "刷新令牌 (refresh_token)，以 ur- 开头。提供后可自动续期约30天",
+    })
+  ),
+};
+
 export const FeishuCalendarSchema = Type.Union([
   // 获取主日历信息（前置步骤，获取 calendar_id）
   Type.Object({
     action: Type.Literal("get_primary"),
-    user_access_token: Type.String({
-      description: "用户访问令牌 (user_access_token)，以 u- 开头",
-    }),
+    ...UserTokenFields,
   }),
   // 获取日程列表
   Type.Object({
     action: Type.Literal("list_events"),
-    user_access_token: Type.String({
-      description: "用户访问令牌 (user_access_token)，以 u- 开头",
-    }),
+    ...UserTokenFields,
     calendar_id: Type.Optional(
       Type.String({
         description: "日历ID，不填则自动获取主日历",
@@ -37,18 +45,14 @@ export const FeishuCalendarSchema = Type.Union([
   // 获取日程详情
   Type.Object({
     action: Type.Literal("get_event"),
-    user_access_token: Type.String({
-      description: "用户访问令牌 (user_access_token)，以 u- 开头",
-    }),
+    ...UserTokenFields,
     calendar_id: Type.String({ description: "日历ID" }),
     event_id: Type.String({ description: "日程ID" }),
   }),
   // 搜索日程
   Type.Object({
     action: Type.Literal("search_events"),
-    user_access_token: Type.String({
-      description: "用户访问令牌 (user_access_token)，以 u- 开头",
-    }),
+    ...UserTokenFields,
     calendar_id: Type.Optional(
       Type.String({
         description: "日历ID，不填则自动获取主日历",
@@ -65,9 +69,7 @@ export const FeishuCalendarSchema = Type.Union([
   // 创建日程
   Type.Object({
     action: Type.Literal("create_event"),
-    user_access_token: Type.String({
-      description: "用户访问令牌 (user_access_token)，以 u- 开头",
-    }),
+    ...UserTokenFields,
     calendar_id: Type.Optional(
       Type.String({
         description: "日历ID，不填则使用主日历",
@@ -108,9 +110,7 @@ export const FeishuCalendarSchema = Type.Union([
   // 更新日程
   Type.Object({
     action: Type.Literal("update_event"),
-    user_access_token: Type.String({
-      description: "用户访问令牌 (user_access_token)，以 u- 开头",
-    }),
+    ...UserTokenFields,
     calendar_id: Type.String({ description: "日历ID" }),
     event_id: Type.String({ description: "日程ID" }),
     summary: Type.Optional(Type.String({ description: "日程标题" })),
@@ -129,9 +129,7 @@ export const FeishuCalendarSchema = Type.Union([
   // 删除日程
   Type.Object({
     action: Type.Literal("delete_event"),
-    user_access_token: Type.String({
-      description: "用户访问令牌 (user_access_token)，以 u- 开头",
-    }),
+    ...UserTokenFields,
     calendar_id: Type.String({ description: "日历ID" }),
     event_id: Type.String({ description: "日程ID" }),
     need_notification: Type.Optional(
